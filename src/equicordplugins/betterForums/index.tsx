@@ -14,9 +14,12 @@ import { Channel } from "@vencord/discord-types";
 import { findComponentByCodeLazy } from "@webpack";
 import { ActiveJoinedThreadsStore, ChannelStore, Menu, React, SelectedChannelStore, useStateFromStores } from "@webpack/common";
 
-import { BetterForumsStore } from "./ThreadStore";
+import { BetterForumsStore, DEFAULT_PREFS } from "./ThreadStore";
 
 const NumberBadge = findComponentByCodeLazy("BADGE_NOTIFICATION_BACKGROUND", "let{count:");
+
+// ChannelFlags.PINNED = 1 << 1
+const PINNED_FLAG = 1 << 1;
 
 const settings = definePluginSettings({
     showOpenThreadCount: {
@@ -35,6 +38,7 @@ export default definePlugin({
     patches: [
         // Intercept activeThreadIds (g) and archivedThreadIds (f) in the forum channel
         // list component right before Discord derives hasActiveThreads (V) and hasAnyThread (W).
+        // The }($1) captures the channel variable from the IIFE call that precedes V/W.
         // Using the comma operator inside V's initializer we:
         //   1. Call useForumPrefs() as a React hook so the component re-renders on pref changes
         //   2. Reassign g in-place with applySort  (reverses for ascending order)
@@ -44,8 +48,8 @@ export default definePlugin({
         {
             find: '"forum-channel-header"',
             replacement: {
-                match: /(\i)=(\i)\.length>0,(\i)=\1\|\|(\i)\.length>0/,
-                replace: "$1=($self.useForumPrefs(),$2=$self.applySort($2,t.id),$4=$self.applyFilter($4,t.id),$2.length>0),$3=$1||$4.length>0"
+                match: /\}\((\i)\),(\i)=(\i)\.length>0,(\i)=\2\|\|(\i)\.length>0/,
+                replace: "}($1),$2=($self.useForumPrefs(),$3=$self.applySort($3,$1.id),$5=$self.applyFilter($5,$1.id),$3.length>0),$4=$2||$5.length>0"
             }
         },
         // Sidebar open thread count badge
@@ -67,8 +71,27 @@ export default definePlugin({
 
             const prefs = BetterForumsStore.getPrefs(channelId);
 
-            children.push(
-                <Menu.MenuSeparator key="bf-sep" />,
+            // Wrap Discord's "Reset to default" action to also reset our prefs
+            const resetIdx = children.findIndex(child =>
+                [child?.props?.children].flat(2).some((c: any) => c?.props?.id === "reset-all")
+            );
+            if (resetIdx !== -1) {
+                const resetGroup = children[resetIdx];
+                const resetItem = [resetGroup.props.children].flat().find((c: any) => c?.props?.id === "reset-all");
+                if (resetItem) {
+                    const origAction = resetItem.props.action;
+                    children[resetIdx] = React.cloneElement(resetGroup, {
+                        children: React.cloneElement(resetItem, {
+                            action: () => {
+                                origAction?.();
+                                BetterForumsStore.setPrefs(channelId, DEFAULT_PREFS);
+                            }
+                        })
+                    });
+                }
+            }
+
+            const items = [
                 <Menu.MenuGroup label="Order" key="bf-order-group">
                     <Menu.MenuRadioItem
                         id="bf-order-desc"
@@ -85,6 +108,7 @@ export default definePlugin({
                         action={() => BetterForumsStore.setPrefs(channelId, { order: "asc" })}
                     />
                 </Menu.MenuGroup>,
+                <Menu.MenuSeparator key="bf-sep" />,
                 <Menu.MenuGroup key="bf-hide-group">
                     <Menu.MenuCheckboxItem
                         id="bf-hide-closed"
@@ -92,8 +116,16 @@ export default definePlugin({
                         checked={prefs.hideClosed}
                         action={() => BetterForumsStore.setPrefs(channelId, { hideClosed: !prefs.hideClosed })}
                     />
-                </Menu.MenuGroup>
-            );
+                </Menu.MenuGroup>,
+                <Menu.MenuSeparator key="bf-sep2" />
+            ];
+
+            // Insert before "Reset to default" so it stays at the bottom
+            if (resetIdx !== -1) {
+                children.splice(resetIdx, 0, ...items);
+            } else {
+                children.push(...items);
+            }
         }
     },
 
@@ -107,11 +139,11 @@ export default definePlugin({
     },
 
     // Reverses the active thread ID array when ascending order is selected.
-    // Pinned posts (ChannelFlags.PINNED = 1 << 1) are kept at the top regardless.
+    // Pinned posts are kept at the top regardless of sort direction.
     applySort(threadIds: string[], channelId: string): string[] {
         const prefs = BetterForumsStore.getPrefs(channelId);
         if (prefs.order === "asc") {
-            const isPinned = (id: string) => ((ChannelStore.getChannel(id)?.flags ?? 0) & 2) !== 0;
+            const isPinned = (id: string) => ((ChannelStore.getChannel(id)?.flags ?? 0) & PINNED_FLAG) !== 0;
             const pinned = threadIds.filter(isPinned);
             const unpinned = threadIds.filter(id => !isPinned(id));
             return [...pinned, ...unpinned.reverse()];
@@ -132,11 +164,11 @@ export default definePlugin({
 
         const openCount = useStateFromStores([ActiveJoinedThreadsStore, BetterForumsStore], () => {
             const joined = ActiveJoinedThreadsStore.getActiveJoinedThreadsForParent(channel.guild_id, channel.id);
-            const unjoined = (ActiveJoinedThreadsStore as any).getActiveUnjoinedThreadsForParent?.(channel.guild_id, channel.id) ?? {};
-            return new Set([...Object.keys(joined), ...Object.keys(unjoined)]).size;
+            const unjoined = ActiveJoinedThreadsStore.getActiveUnjoinedThreadsForParent(channel.guild_id, channel.id);
+            return Object.keys(joined).length + Object.keys(unjoined).length;
         });
 
         if (!openCount) return null;
-        return <NumberBadge color="var(--brand-500)" count={openCount} />;
+        return <NumberBadge className="bf-forum-badge" color="var(--brand-500)" count={openCount} />;
     }, { noop: true }),
 });

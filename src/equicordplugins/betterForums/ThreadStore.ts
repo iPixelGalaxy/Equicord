@@ -5,12 +5,11 @@
  */
 
 import { proxyLazy } from "@utils/lazy";
-import { FluxEmitter, FluxStore } from "@vencord/discord-types";
+import { Flux as TFlux, FluxStore } from "@vencord/discord-types";
 import { Flux as FluxWP, FluxDispatcher } from "@webpack/common";
 
-interface IFlux {
-    PersistedStore: typeof FluxStore;
-    Emitter: FluxEmitter;
+interface IFlux extends TFlux {
+    PersistedStore: TFlux["Store"];
 }
 
 export interface ChannelPrefs {
@@ -18,10 +17,12 @@ export interface ChannelPrefs {
     hideClosed: boolean;
 }
 
+export const DEFAULT_PREFS: ChannelPrefs = { order: "desc", hideClosed: false };
+
 const channelPrefsMap = new Map<string, ChannelPrefs>();
 
 export const BetterForumsStore = proxyLazy(() => {
-    class BetterForumsStore extends (FluxWP as unknown as IFlux).PersistedStore {
+    class BetterForumsStore extends (FluxWP as IFlux).PersistedStore {
         static persistKey = "BetterForumsStore";
 
         // @ts-ignore
@@ -36,7 +37,7 @@ export const BetterForumsStore = proxyLazy(() => {
         }
 
         getPrefs(channelId: string): ChannelPrefs {
-            return channelPrefsMap.get(channelId) ?? { order: "desc", hideClosed: false };
+            return channelPrefsMap.get(channelId) ?? DEFAULT_PREFS;
         }
 
         setPrefs(channelId: string, prefs: Partial<ChannelPrefs>) {
