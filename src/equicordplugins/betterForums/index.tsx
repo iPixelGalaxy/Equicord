@@ -165,12 +165,17 @@ export default definePlugin({
     // a re-render via BetterForumsStore so applySort/applyFilter pick up the new value.
     // (The cache is written AFTER applySort/applyFilter run each render, so without the
     // re-render trigger there would be a 1-frame lag when the tag filter changes.)
-    cacheTagFilter(tagFilter: string[], channelId: string) {
-        const incoming = tagFilter ?? [];
+    cacheTagFilter(tagFilter: any, channelId: string) {
+        // Discord's tagFilter may be a Set, array, or other iterable — normalise to string[]
+        let incoming: string[];
+        if (!tagFilter) incoming = [];
+        else if (Array.isArray(tagFilter)) incoming = tagFilter;
+        else try { incoming = Array.from(tagFilter); } catch { incoming = []; }
+
         const prev = tagFilterCache.get(channelId);
-        const changed = !prev || prev.length !== incoming.length || prev.some((t, i) => t !== incoming[i]);
         tagFilterCache.set(channelId, incoming);
-        if (changed) setTimeout(() => BetterForumsStore.emitChange(), 0);
+        if (!prev || prev.length !== incoming.length || prev.some((t, i) => t !== incoming[i]))
+            setTimeout(() => BetterForumsStore.emitChange(), 0);
     },
 
     // Wraps the "Clear all" button in the tag filter popout with a flex row that
