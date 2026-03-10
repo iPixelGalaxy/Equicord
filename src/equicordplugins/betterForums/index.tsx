@@ -56,14 +56,24 @@ export default definePlugin({
                     match: /\}\((\i)\),(\i)=(\i)\.length>0,(\i)=\2\|\|(\i)\.length>0/,
                     replace: "}($1),$2=($self.useForumPrefs(),$3=$self.applySort($3,$1.id),$5=$self.applyFilter($5,$1.id),$3.length>0),$4=$2||$5.length>0"
                 },
-                // Capture the active tag filter (J) via a side-effect declarator after it's
-                // computed from Discord's useForumChannelSettings call. The _bfTagCache variable
-                // is unused (null) — the call to cacheTagFilter is the only purpose.
+                // Capture the active tag filter via a side-effect declarator after Discord computes it.
+                // More flexible regex: tagSetting may be absent, IIFE wrapper is optional.
                 {
-                    match: /tagFilter:(\i),tagSetting:(\i)\}=\(0,(\i)\.(\i)\)\((\i)\.id\)/,
-                    replace: "tagFilter:$1,tagSetting:$2}=(0,$3.$4)($5.id),_bfTagCache=($self.cacheTagFilter($1,$5.id),null)"
+                    match: /(\{tagFilter:(\i)[^}]*\}=(?:\(0,)?\i\.\i\)?\((\i)\.id\))/,
+                    replace: "$1,_bfTagCache=($self.cacheTagFilter($2,$3.id),null)"
                 }
             ]
+        },
+        // Wrap the "Clear all" button in the tag filter popout with a flex row that
+        // also contains the "Hide Selected Tags" toggle on the opposite side.
+        // The patch prepends $self.wrapTagFooter( — the existing ) at the end of the
+        // button expression naturally closes the wrapTagFooter call.
+        {
+            find: "-all-tags-dropdown-navigator",
+            replacement: {
+                match: /(\(0,\i\.jsxs?\)\("button",\{"data-mana-component":"text-button"(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}\))/,
+                replace: "$self.wrapTagFooter($1)"
+            }
         },
         // Sidebar open thread count badge
         {
@@ -129,12 +139,6 @@ export default definePlugin({
                         checked={prefs.hideClosed}
                         action={() => BetterForumsStore.setPrefs(channelId, { hideClosed: !prefs.hideClosed })}
                     />
-                    <Menu.MenuCheckboxItem
-                        id="bf-hide-tagged"
-                        label="Hide Selected Tags"
-                        checked={prefs.hideTagged}
-                        action={() => BetterForumsStore.setPrefs(channelId, { hideTagged: !prefs.hideTagged })}
-                    />
                 </Menu.MenuGroup>,
                 <Menu.MenuSeparator key="bf-sep2" />
             ];
@@ -157,10 +161,25 @@ export default definePlugin({
         });
     },
 
-    // Stores the active tag filter for a channel so applySort/applyFilter can use it.
-    // Called as a side-effect declarator in the patched let chain, after Discord computes tagFilter.
+    // Stores the active tag filter for a channel. If the filter changed, schedules
+    // a re-render via BetterForumsStore so applySort/applyFilter pick up the new value.
+    // (The cache is written AFTER applySort/applyFilter run each render, so without the
+    // re-render trigger there would be a 1-frame lag when the tag filter changes.)
     cacheTagFilter(tagFilter: string[], channelId: string) {
-        tagFilterCache.set(channelId, tagFilter ?? []);
+        const incoming = tagFilter ?? [];
+        const prev = tagFilterCache.get(channelId);
+        const changed = !prev || prev.length !== incoming.length || prev.some((t, i) => t !== incoming[i]);
+        tagFilterCache.set(channelId, incoming);
+        if (changed) setTimeout(() => BetterForumsStore.emitChange(), 0);
+    },
+
+    // Wraps the "Clear all" button in the tag filter popout with a flex row that
+    // includes the "Hide Selected Tags" toggle on the left.
+    wrapTagFooter(clearButton: React.ReactElement): React.ReactElement {
+        return React.createElement("div", { className: "bf-tag-footer" },
+            React.createElement(this.HideTaggedCheckbox),
+            clearButton
+        );
     },
 
     // Filters and/or reverses the active thread ID array based on per-channel prefs.
@@ -205,6 +224,29 @@ export default definePlugin({
         }
         return archivedThreadIds;
     },
+
+    HideTaggedCheckbox: ErrorBoundary.wrap(() => {
+        const channelId = SelectedChannelStore.getChannelId();
+        if (!channelId) return null;
+        const channel = ChannelStore.getChannel(channelId);
+        if (!channel?.isForumChannel()) return null;
+
+        const hideTagged = useStateFromStores([BetterForumsStore], () =>
+            BetterForumsStore.getPrefs(channelId).hideTagged
+        );
+
+        return (
+            <label className="bf-hide-tagged-label">
+                <input
+                    type="checkbox"
+                    className="bf-hide-tagged-checkbox"
+                    checked={hideTagged}
+                    onChange={() => BetterForumsStore.setPrefs(channelId, { hideTagged: !hideTagged })}
+                />
+                Hide Selected Tags
+            </label>
+        );
+    }, { noop: true }),
 
     ForumBadge: ErrorBoundary.wrap(({ channel }: { channel: Channel; }) => {
         if (!channel.isForumChannel()) return null;
