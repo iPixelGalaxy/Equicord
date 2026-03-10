@@ -41,7 +41,7 @@ export default definePlugin({
 
     patches: [
         {
-            find: '"forum-channel-header"',
+            find: "forum-grid-header-section-",
             replacement: [
                 // Intercept activeThreadIds (g) and archivedThreadIds (f) in the forum channel
                 // list component right before Discord derives hasActiveThreads (V) and hasAnyThread (W).
