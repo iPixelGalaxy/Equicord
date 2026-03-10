@@ -21,6 +21,10 @@ const NumberBadge = findComponentByCodeLazy("BADGE_NOTIFICATION_BACKGROUND", "le
 // ChannelFlags.PINNED = 1 << 1
 const PINNED_FLAG = 1 << 1;
 
+const tagFilterCache = new Map<string, string[]>();
+
+type ThreadChannel = Channel & { appliedTags?: string[]; };
+
 const settings = definePluginSettings({
     showOpenThreadCount: {
         type: OptionType.BOOLEAN,
@@ -31,26 +35,35 @@ const settings = definePluginSettings({
 
 export default definePlugin({
     name: "BetterForums",
-    description: "Adds per-channel sort order (ascending/descending), hide closed threads filter, and open thread count badges to Discord forum channels",
+    description: "Adds per-channel sort order (ascending/descending), hide closed threads filter, hide selected tags filter, and open thread count badges to Discord forum channels",
     authors: [EquicordDevs.iPixelGalaxy],
     settings,
 
     patches: [
-        // Intercept activeThreadIds (g) and archivedThreadIds (f) in the forum channel
-        // list component right before Discord derives hasActiveThreads (V) and hasAnyThread (W).
-        // The }($1) captures the channel variable from the IIFE call that precedes V/W.
-        // Using the comma operator inside V's initializer we:
-        //   1. Call useForumPrefs() as a React hook so the component re-renders on pref changes
-        //   2. Reassign g in-place with applySort  (reverses for ascending order)
-        //   3. Reassign f in-place with applyFilter (empties array when Hide Closed is on)
-        // Both eG (section counts) and ez (section data) are computed after this point,
-        // so they naturally pick up the modified arrays.
         {
             find: '"forum-channel-header"',
-            replacement: {
-                match: /\}\((\i)\),(\i)=(\i)\.length>0,(\i)=\2\|\|(\i)\.length>0/,
-                replace: "}($1),$2=($self.useForumPrefs(),$3=$self.applySort($3,$1.id),$5=$self.applyFilter($5,$1.id),$3.length>0),$4=$2||$5.length>0"
-            }
+            replacement: [
+                // Intercept activeThreadIds (g) and archivedThreadIds (f) in the forum channel
+                // list component right before Discord derives hasActiveThreads (V) and hasAnyThread (W).
+                // The }($1) captures the channel variable from the IIFE call that precedes V/W.
+                // Using the comma operator inside V's initializer we:
+                //   1. Call useForumPrefs() as a React hook so the component re-renders on pref changes
+                //   2. Reassign g in-place with applySort  (reverses for ascending order, filters tagged)
+                //   3. Reassign f in-place with applyFilter (hides closed / tagged when active)
+                // Both eG (section counts) and ez (section data) are computed after this point,
+                // so they naturally pick up the modified arrays.
+                {
+                    match: /\}\((\i)\),(\i)=(\i)\.length>0,(\i)=\2\|\|(\i)\.length>0/,
+                    replace: "}($1),$2=($self.useForumPrefs(),$3=$self.applySort($3,$1.id),$5=$self.applyFilter($5,$1.id),$3.length>0),$4=$2||$5.length>0"
+                },
+                // Capture the active tag filter (J) via a side-effect declarator after it's
+                // computed from Discord's useForumChannelSettings call. The _bfTagCache variable
+                // is unused (null) — the call to cacheTagFilter is the only purpose.
+                {
+                    match: /tagFilter:(\i),tagSetting:(\i)\}=\(0,(\i)\.(\i)\)\((\i)\.id\)/,
+                    replace: "tagFilter:$1,tagSetting:$2}=(0,$3.$4)($5.id),_bfTagCache=($self.cacheTagFilter($1,$5.id),null)"
+                }
+            ]
         },
         // Sidebar open thread count badge
         {
@@ -116,6 +129,12 @@ export default definePlugin({
                         checked={prefs.hideClosed}
                         action={() => BetterForumsStore.setPrefs(channelId, { hideClosed: !prefs.hideClosed })}
                     />
+                    <Menu.MenuCheckboxItem
+                        id="bf-hide-tagged"
+                        label="Hide Selected Tags"
+                        checked={prefs.hideTagged}
+                        action={() => BetterForumsStore.setPrefs(channelId, { hideTagged: !prefs.hideTagged })}
+                    />
                 </Menu.MenuGroup>,
                 <Menu.MenuSeparator key="bf-sep2" />
             ];
@@ -138,23 +157,52 @@ export default definePlugin({
         });
     },
 
-    // Reverses the active thread ID array when ascending order is selected.
+    // Stores the active tag filter for a channel so applySort/applyFilter can use it.
+    // Called as a side-effect declarator in the patched let chain, after Discord computes tagFilter.
+    cacheTagFilter(tagFilter: string[], channelId: string) {
+        tagFilterCache.set(channelId, tagFilter ?? []);
+    },
+
+    // Filters and/or reverses the active thread ID array based on per-channel prefs.
     // Pinned posts are kept at the top regardless of sort direction.
     applySort(threadIds: string[], channelId: string): string[] {
         const prefs = BetterForumsStore.getPrefs(channelId);
+        let result = [...threadIds];
+
+        if (prefs.hideTagged) {
+            const tagFilter = tagFilterCache.get(channelId) ?? [];
+            if (tagFilter.length > 0) {
+                const tagSet = new Set(tagFilter);
+                result = result.filter(id => {
+                    const thread = ChannelStore.getChannel(id) as ThreadChannel | null;
+                    return !thread || !(thread.appliedTags ?? []).some(tag => tagSet.has(tag));
+                });
+            }
+        }
+
         if (prefs.order === "asc") {
             const isPinned = (id: string) => ((ChannelStore.getChannel(id)?.flags ?? 0) & PINNED_FLAG) !== 0;
-            const pinned = threadIds.filter(isPinned);
-            const unpinned = threadIds.filter(id => !isPinned(id));
+            const pinned = result.filter(isPinned);
+            const unpinned = result.filter(id => !isPinned(id));
             return [...pinned, ...unpinned.reverse()];
         }
-        return threadIds;
+        return result;
     },
 
-    // Returns an empty array (hiding all closed threads) when Hide Closed is active.
+    // Filters the archived thread ID array based on per-channel prefs.
     applyFilter(archivedThreadIds: string[], channelId: string): string[] {
         const prefs = BetterForumsStore.getPrefs(channelId);
         if (prefs.hideClosed) return [];
+        if (prefs.hideTagged) {
+            const tagFilter = tagFilterCache.get(channelId) ?? [];
+            if (tagFilter.length > 0) {
+                const tagSet = new Set(tagFilter);
+                return archivedThreadIds.filter(id => {
+                    const thread = ChannelStore.getChannel(id) as ThreadChannel | null;
+                    return !thread || !(thread.appliedTags ?? []).some(tag => tagSet.has(tag));
+                });
+            }
+        }
         return archivedThreadIds;
     },
 

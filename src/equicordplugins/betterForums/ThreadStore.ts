@@ -15,9 +15,10 @@ interface IFlux extends TFlux {
 export interface ChannelPrefs {
     order: "asc" | "desc";
     hideClosed: boolean;
+    hideTagged: boolean;
 }
 
-export const DEFAULT_PREFS: ChannelPrefs = { order: "desc", hideClosed: false };
+export const DEFAULT_PREFS: ChannelPrefs = { order: "desc", hideClosed: false, hideTagged: false };
 
 const channelPrefsMap = new Map<string, ChannelPrefs>();
 
